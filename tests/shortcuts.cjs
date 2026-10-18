@@ -1,0 +1,17 @@
+'use strict';
+const assert=require('node:assert/strict');
+const{DEFAULT_SHORTCUTS,validateShortcuts,ShortcutController}=require('../shortcuts.cjs');
+assert.equal(validateShortcuts({...DEFAULT_SHORTCUTS,next:'Alt+Control+Right'}).next,'Control+Alt+Right');
+for(const next of ['A','Shift+A','Control+Control+A','Alt+F4','Super+L','Control+Alt+Delete','Control+BadKey'])assert.throws(()=>validateShortcuts({...DEFAULT_SHORTCUTS,next}));
+assert.throws(()=>validateShortcuts({...DEFAULT_SHORTCUTS,next:DEFAULT_SHORTCUTS.previous}));
+assert.equal(validateShortcuts({...DEFAULT_SHORTCUTS,next:''}).next,'');
+const registered=new Map(),blocked=new Set(),events=[];let persisted=null,failSave=false;
+const api={register:(key,callback)=>{if(blocked.has(key)||registered.has(key))return false;registered.set(key,callback);return true;},unregister:key=>registered.delete(key),isRegistered:key=>registered.has(key)};
+const controller=new ShortcutController(api,DEFAULT_SHORTCUTS,action=>events.push(action),config=>{if(failSave)throw new Error('保存失败');persisted={...config};});
+assert.equal(controller.apply(DEFAULT_SHORTCUTS).ok,true);registered.get(DEFAULT_SHORTCUTS.next)();assert.deepEqual(events,['next']);
+const edited={enabled:true,previous:'Control+Alt+F9',toggle:'Control+Alt+F10',next:'Control+Alt+F11'};
+blocked.add(edited.next);assert.equal(controller.apply(edited).ok,false);assert.ok(Object.values(controller.state().registered).every(Boolean));assert.deepEqual(persisted,DEFAULT_SHORTCUTS);assert.equal(registered.has(edited.previous),false);blocked.clear();
+assert.equal(controller.suspend(true).ok,true);assert.equal(registered.size,0);assert.equal(controller.apply(edited).ok,true);assert.equal(registered.size,0);assert.deepEqual(persisted,edited);assert.equal(controller.suspend(false).ok,true);assert.ok(Object.values(controller.state().registered).every(Boolean));
+failSave=true;assert.equal(controller.apply(DEFAULT_SHORTCUTS).ok,false);assert.deepEqual(controller.state().config,edited);assert.ok(Object.values(controller.state().registered).every(Boolean));failSave=false;
+assert.equal(controller.apply({...edited,enabled:false}).ok,true);assert.equal(registered.size,0);assert.equal(controller.apply(edited).ok,true);controller.unregister();assert.equal(registered.size,0);
+console.log('PASS: shortcut validation, canonicalization, duplicate/system key rejection, dispatch, conflict rollback, recording suspension, persistence failure rollback, disable and unregister');
