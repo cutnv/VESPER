@@ -20,6 +20,12 @@ function playlistSummary(p){return {id:String(p.id),name:p.name,cover:p.coverImg
 function parseLRC(text){const lines=[];for(const row of String(text||'').split(/\r?\n/)){const content=row.replace(/\[[^\]]*\]/g,'').trim();if(!content)continue;for(const m of row.matchAll(/\[(\d+):(\d+(?:\.\d+)?)\]/g))lines.push({time:Number(m[1])*60+Number(m[2]),text:content});}return lines.sort((a,b)=>a.time-b.time);}
 function interpretLyrics(result){const lines=parseLRC(result.lrc?.lyric),marker=text=>/^(?:纯音乐[，,、\s]*(?:请(?:您)?欣赏)?|instrumental(?: music)?)[。.!！]?$/i.test(text.trim()),labels=lines.map(line=>line.text),plain=String(result.lrc?.lyric||'').replace(/\[[^\]]*\]/g,'').trim();const instrumental=result.nolyric===true||result.nolyric===1||marker(plain)||(labels.some(marker)&&labels.every(text=>marker(text)||/^(作词|作曲|编曲|制作人)\s*[:：]/.test(text)));return{lines:instrumental?[]:lines,translation:instrumental?[]:parseLRC(result.tlyric?.lyric),instrumental};}
 function validatedSettings(input){const s={...DEFAULTS};for(const [key,values]of Object.entries({quality:LEVELS,accent:['blue','green','rose','amber'],theme:['light','dark'],mode:['loop','single','shuffle']}))if(values.includes(input?.[key]))s[key]=input[key];s.compact=!!input?.compact;s.closeToTray=input?.closeToTray!==false;s.volume=Number.isFinite(input?.volume)?Math.max(0,Math.min(1,input.volume)):.65;s.playerLayout=input?.playerLayout==='cover'?'cover':'split';s.crossfade=[0,2,4,6,8].includes(input?.crossfade)?input.crossfade:4;s.lyricSize=[18,22,26,30].includes(input?.lyricSize)?input.lyricSize:22;try{s.shortcuts=validateShortcuts(input?.shortcuts||DEFAULT_SHORTCUTS);}catch{s.shortcuts={...DEFAULT_SHORTCUTS};}return s;}
+function validatedShuffle(input,queue,current){
+  if(!input||input.current!==current||!['known','remaining','history'].every(name=>Array.isArray(input[name])&&input[name].length<=2000&&input[name].every(id=>typeof id==='string'&&id.length<=128)))return null;
+  if(!Number.isInteger(input.cursor)||input.cursor<-1||input.cursor>=input.history.length||(current?input.history[input.cursor]!==current:input.history.length!==0))return null;
+  const keys=new Set(queue.map(track=>track.source+':'+track.id)),known=[...new Set(input.known)].filter(id=>keys.has(id)),allowed=new Set(known);
+  return{known,remaining:[...new Set(input.remaining)].filter(id=>allowed.has(id)),history:[...input.history],cursor:input.cursor,current};
+}
 
 async function startServer(options={}){
   configurePaths();const dataDir=options.dataDir||path.join(ROOT,'data');fs.mkdirSync(dataDir,{recursive:true});
@@ -29,7 +35,8 @@ async function startServer(options={}){
   let user=null,qrKey='',keyPromise=null;
   let likesVersion=0,likesRevision=0,likesRequest=null,likesIds=new Set(),likesLoaded=false,likesAt=0;
   let likedPlaylistId=null;
-  function resetLikes(){likesVersion++;likesRevision++;likesRequest=null;likesIds=new Set();likesLoaded=false;likesAt=0;likedPlaylistId=null;}
+  let favoriteSearchIndex=null;
+  function resetLikes(){likesVersion++;likesRevision++;likesRequest=null;likesIds=new Set();likesLoaded=false;likesAt=0;likedPlaylistId=null;favoriteSearchIndex=null;}
   let settings=validatedSettings(readJSON(path.join(dataDir,'settings.json'),DEFAULTS));
   let state=readJSON(path.join(dataDir,'player.json'),{queue:[],current:null,position:0});
   let library=readJSON(path.join(dataDir,'local-library.json'),[]),favorites=readJSON(path.join(dataDir,'favorites.json'),[]);
@@ -41,6 +48,7 @@ async function startServer(options={}){
   async function account(){if(!cookie){if(user)resetLikes();user=null;return{loggedIn:false};}const result=await call('login_status'),p=(result.data||result).profile;if(!p?.userId){if(user)resetLikes();user=null;return{loggedIn:false,expired:true};}if(user?.id!==String(p.userId))resetLikes();user={loggedIn:true,id:String(p.userId),nickname:p.nickname,avatar:p.avatarUrl||'',vip:!!p.vipType};return user;}
   async function syncLikes(force=false){
     if(!user)throw new Error('请先扫码登录网易云账号');
+    if(force)favoriteSearchIndex=null;
     if(likesLoaded&&!force&&Date.now()-likesAt<30000)return;
     if(likesRequest)return likesRequest;
     const version=likesVersion,revision=likesRevision,uid=user.id;
@@ -66,6 +74,13 @@ async function startServer(options={}){
     try{await syncLikes(force);return{status:'ready',ids:[...likesIds],owner:user.id};}
     catch(error){return{status:'error',ids:likesLoaded?[...likesIds]:null,owner:user?.id||null,error:error.message};}
   }
+  function indexedFavoriteSongs(ids){
+    const owner=user.id,version=likesVersion,signature=ids.join(',');
+    if(favoriteSearchIndex?.owner===owner&&favoriteSearchIndex.signature===signature)return favoriteSearchIndex.promise;
+    const entry={owner,signature,promise:null};
+    entry.promise=songDetails(ids).then(songs=>{if(version!==likesVersion||user?.id!==owner)throw new Error('账号已切换，请重新搜索红心歌曲');return songs;}).catch(error=>{if(favoriteSearchIndex===entry)favoriteSearchIndex=null;throw error;});
+    favoriteSearchIndex=entry;return entry.promise;
+  }
   function publicLocal(track){const{file,coverFile,...rest}=track;return{...rest,source:'local'};}
   async function resolveShare(input,type){let id=parseId(input,type);if(id)return id;const match=String(input||'').match(/https?:\/\/163cn\.tv\/[^\s<>"，。]+/);if(match){let link=match[0];for(let i=0;i<5;i++){const url=new URL(link);if(!(url.hostname==='163cn.tv'||url.hostname==='music.163.com'||url.hostname.endsWith('.music.163.com')))break;id=parseId(link,type);if(id)return id;const response=await fetch(link,{redirect:'manual',signal:AbortSignal.timeout(8000)});await response.body?.cancel();if(!response.headers.get('location'))break;link=new URL(response.headers.get('location'),link).href;}}throw new Error('没有识别到链接，请粘贴完整网易云链接或数字 ID');}
   async function action(name,b){
@@ -77,7 +92,16 @@ async function startServer(options={}){
     if(name==='logout'){cookie='';user=null;resetLikes();qrKey='';media.clear();fs.rmSync(sessionFile,{force:true});return{ok:true};}
     if(name==='likes')return likesResult(b.force===true);
     if(name==='favorites'){
-      const local=favorites.filter(t=>t.source==='local');if(!user)return{songs:local,total:local.length,cloudTotal:0,more:false,nextOffset:0,signedOut:true};
+      const local=favorites.filter(t=>t.source==='local'),keywords=String(b.keywords||'').normalize('NFKC').trim().toLowerCase().slice(0,100);
+      if(keywords){
+        if(user)await syncLikes(b.force===true);
+        const owner=user?.id||null,version=likesVersion,ids=[...likesIds],cloud=user?await indexedFavoriteSongs(ids):[];
+        if(version!==likesVersion||(user?.id||null)!==owner)throw new Error('账号已切换，请重新搜索红心歌曲');
+        const terms=keywords.split(/\s+/),matches=[...cloud,...local].filter(track=>{const text=[track.name,track.artists,track.album].join(' ').normalize('NFKC').toLowerCase();return terms.every(term=>text.includes(term));});
+        const offset=Math.max(0,Math.floor(Number(b.offset)||0)),songs=matches.slice(offset,offset+SONG_PAGE_SIZE),nextOffset=offset+songs.length;
+        return{songs,total:matches.length,cloudTotal:ids.length,nextOffset,more:nextOffset<matches.length,filtered:true,signedOut:!user};
+      }
+      if(!user)return{songs:local,total:local.length,cloudTotal:0,more:false,nextOffset:0,signedOut:true};
       await syncLikes(b.force===true);const owner=user.id,version=likesVersion,offset=Math.max(0,Number(b.offset)||0),ids=[...likesIds].slice(offset,offset+SONG_PAGE_SIZE),songs=await songDetails(ids);
       if(version!==likesVersion||user?.id!==owner)throw new Error('账号已切换，请重新同步红心');
       return{songs:offset===0?[...songs,...local]:songs,total:likesIds.size+local.length,cloudTotal:likesIds.size,nextOffset:offset+ids.length,more:offset+ids.length<likesIds.size};
@@ -130,7 +154,7 @@ async function startServer(options={}){
       if(b.enabled&&!favorites.some(x=>x.id===t.id&&x.source===t.source))favorites.unshift(t);if(!b.enabled)favorites=favorites.filter(x=>x.id!==t.id||x.source!==t.source);favorites=favorites.slice(0,2000);writeJSON(path.join(dataDir,'favorites.json'),favorites);return{favorites:favorites.filter(t=>t.source==='local')};
     }
     if(name==='settings'){settings=validatedSettings({...settings,...b});writeJSON(path.join(dataDir,'settings.json'),settings);return settings;}
-    if(name==='state'){if(!Array.isArray(b.queue)||b.queue.length>2000)throw new Error('播放列表过长');state={queue:b.queue.filter(t=>t&&typeof t.id==='string'&&['netease','local'].includes(t.source)&&typeof t.name==='string'),current:typeof b.current==='string'?b.current:null,position:Math.max(0,Number(b.position)||0)};writeJSON(path.join(dataDir,'player.json'),state);return{ok:true};}
+    if(name==='state'){if(!Array.isArray(b.queue)||b.queue.length>2000)throw new Error('播放列表过长');const queue=b.queue.filter(t=>t&&typeof t.id==='string'&&['netease','local'].includes(t.source)&&typeof t.name==='string'),current=typeof b.current==='string'?b.current:null;state={queue,current,position:Math.max(0,Number(b.position)||0),shuffle:validatedShuffle(b.shuffle,queue,current)};writeJSON(path.join(dataDir,'player.json'),state);return{ok:true};}
     if(name==='local')return{songs:library.map(publicLocal)};
     throw new Error('不支持的操作');
   }
@@ -157,5 +181,5 @@ async function startServer(options={}){
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(options.port??17634,'127.0.0.1',()=>{origin='http://127.0.0.1:'+server.address().port;resolve();});});
   return{server,origin,token,importLocal,getSettings:()=>settings,setShortcuts:config=>{const updated=validatedSettings({...settings,shortcuts:config});writeJSON(path.join(dataDir,'settings.json'),updated);settings=updated;return settings.shortcuts;},close:()=>new Promise(resolve=>server.close(resolve))};
 }
-module.exports={startServer,configurePaths,parseId,isTrial,safeMediaURL,parseLRC,interpretLyrics,validatedSettings,protect,normalizeSong};
+module.exports={startServer,configurePaths,parseId,isTrial,safeMediaURL,parseLRC,interpretLyrics,validatedSettings,validatedShuffle,protect,normalizeSong};
 if(require.main===module)startServer().then(s=>console.log('VESPER已启动：'+s.origin)).catch(e=>{console.error(e.message);process.exitCode=1;});

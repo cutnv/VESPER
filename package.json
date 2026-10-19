@@ -5,14 +5,10 @@
   "private": true,
   "main": "electron.cjs",
   "scripts": {
-    "start": "electron .",
-    "check": "node check.cjs"
+    "start": "electron ."
   },
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "4.41.1",
     "electron": "44.8.0"
-  },
-  "devDependencies": {
-    "playwright-core": "1.64.1"
   }
 }

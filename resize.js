@@ -3,7 +3,7 @@
 {
   const surface=document.querySelector('.app-shell');let pointer=null,frame=0,latest=null;
   surface.addEventListener('pointerdown',event=>{
-    if(event.button!==0||!window.desktop||nativeWindowState.maximized||nativeWindowState.fullscreen||event.target.closest('button,input,select,textarea,a,[role=button],.song-table,.lyrics,.track-titles,.search-box,.search-suggestions,.resize-grip,dialog'))return;
+    if(event.button!==0||!window.desktop||nativeWindowState.maximized||nativeWindowState.fullscreen||event.target.closest('button,input,select,textarea,a,[role=button],.song-table,.lyrics,.track-titles,.search-box,.search-suggestions,.favorites-search,.resize-grip,dialog'))return;
     const scroller=event.target.closest('.main-content,.side-content');if(scroller&&event.clientX>=scroller.getBoundingClientRect().left+scroller.clientLeft+scroller.clientWidth)return;
     event.preventDefault();pointer=event.pointerId;surface.setPointerCapture(pointer);
     window.desktop.startDrag({x:event.screenX,y:event.screenY}).then(ok=>{if(!ok&&pointer===event.pointerId){surface.releasePointerCapture(pointer);pointer=null;}});
